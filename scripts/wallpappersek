@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+VIDEO_DIR="${WALLPAPPERSEK_VIDEO_DIR:-${HOME}/Downloads/Youtube}"
+OUTPUT="${WALLPAPPERSEK_OUTPUT:-*}"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+PID_FILE="${RUNTIME_DIR}/wallpappersek.pid"
+LOG_FILE="${RUNTIME_DIR}/wallpappersek.log"
+AUTOSTART_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/autostart"
+AUTOSTART_FILE="${AUTOSTART_DIR}/wallpappersek.desktop"
+
+usage() {
+    cat <<'EOF'
+wallpappersek - wallpaper animado leve para CachyOS + COSMIC
+
+Uso:
+  wallpappersek import <video...>      Copia videos para a pasta padrao
+  wallpappersek optimize <video>       Cria uma versao leve na pasta padrao
+  wallpappersek smooth-loop <video>    Cria uma versao ping-pong para loop suave
+  wallpappersek list                   Lista videos salvos
+  wallpappersek play <nome|caminho>    Roda um video como wallpaper animado
+  wallpappersek change <nome|caminho>  Alias de play
+  wallpappersek stop                   Para o wallpaper animado
+  wallpappersek status                 Mostra se esta rodando
+  wallpappersek autostart <video>      Inicia este video ao entrar no COSMIC
+  wallpappersek autostart-disable      Remove a inicializacao automatica
+  wallpappersek deps                   Mostra dependencias recomendadas
+  wallpappersek help                   Mostra esta ajuda
+
+Variaveis:
+  WALLPAPPERSEK_VIDEO_DIR              Pasta de videos, padrao: ~/Downloads/Youtube
+  WALLPAPPERSEK_OUTPUT                 Saida do monitor para mpvpaper, padrao: *
+
+Formatos aceitos: mp4, webm, mkv, mov
+EOF
+}
+
+is_video() {
+    case "${1,,}" in
+        *.mp4|*.webm|*.mkv|*.mov) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+ensure_dirs() {
+    mkdir -p "${VIDEO_DIR}" "${RUNTIME_DIR}"
+}
+
+absolute_path() {
+    local path="$1"
+
+    if [[ "${path}" = /* ]]; then
+        printf '%s\n' "${path}"
+    else
+        printf '%s/%s\n' "$(pwd)" "${path}"
+    fi
+}
+
+desktop_quote() {
+    local value="$1"
+
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"\n' "${value}"
+}
+
+resolve_video() {
+    local input="$1"
+    local candidate
+
+    if [[ -f "${input}" ]]; then
+        absolute_path "${input}"
+        return 0
+    fi
+
+    candidate="${VIDEO_DIR}/${input}"
+    if [[ -f "${candidate}" ]]; then
+        absolute_path "${candidate}"
+        return 0
+    fi
+
+    printf 'Video nao encontrado: %s\n' "${input}" >&2
+    return 1
+}
+
+require_backend() {
+    if ! command -v mpvpaper >/dev/null 2>&1; then
+        printf 'Backend nao encontrado: mpvpaper\n' >&2
+        printf 'No CachyOS/Arch, instale com: yay -S --needed mpv mpvpaper\n' >&2
+        printf 'Depois rode novamente: wallpappersek play <video>\n' >&2
+        return 1
+    fi
+}
+
+running_pid() {
+    local pid
+
+    [[ -f "${PID_FILE}" ]] || return 1
+    pid="$(cat "${PID_FILE}")"
+    [[ -n "${pid}" ]] || return 1
+    kill -0 "${pid}" >/dev/null 2>&1 || return 1
+    printf '%s\n' "${pid}"
+}
+
+command_import() {
+    local source
+    local target
+
+    [[ "$#" -gt 0 ]] || {
+        printf 'Informe pelo menos um arquivo de video.\n' >&2
+        return 1
+    }
+
+    ensure_dirs
+
+    for source in "$@"; do
+        [[ -f "${source}" ]] || {
+            printf 'Arquivo nao encontrado: %s\n' "${source}" >&2
+            return 1
+        }
+
+        is_video "${source}" || {
+            printf 'Formato de video nao aceito: %s\n' "${source}" >&2
+            return 1
+        }
+
+        target="${VIDEO_DIR}/$(basename "${source}")"
+        cp "${source}" "${target}"
+        printf 'Importado: %s\n' "${target}"
+    done
+}
+
+command_list() {
+    ensure_dirs
+
+    find "${VIDEO_DIR}" -maxdepth 1 -type f \
+        \( -iname '*.mp4' -o -iname '*.webm' -o -iname '*.mkv' -o -iname '*.mov' \) \
+        -printf '%f\n' | sort
+}
+
+command_optimize() {
+    local source
+    local base
+    local name
+    local target
+
+    [[ "$#" -eq 1 ]] || {
+        printf 'Uso: wallpappersek optimize <video>\n' >&2
+        return 1
+    }
+
+    command -v ffmpeg >/dev/null 2>&1 || {
+        printf 'Dependencia nao encontrada: ffmpeg\n' >&2
+        return 1
+    }
+
+    ensure_dirs
+    source="$(resolve_video "$1")"
+    is_video "${source}" || {
+        printf 'Formato de video nao aceito: %s\n' "${source}" >&2
+        return 1
+    }
+
+    base="$(basename "${source}")"
+    name="${base%.*}"
+    target="${VIDEO_DIR}/${name}-leve.mp4"
+
+    ffmpeg -y -i "${source}" \
+        -an \
+        -vf "fps=30,scale='min(1920,iw)':-2" \
+        -c:v libx264 \
+        -preset medium \
+        -crf 24 \
+        -pix_fmt yuv420p \
+        -movflags +faststart \
+        "${target}"
+
+    printf 'Video otimizado: %s\n' "${target}"
+}
+
+command_smooth_loop() {
+    local source
+    local base
+    local name
+    local target
+
+    [[ "$#" -eq 1 ]] || {
+        printf 'Uso: wallpappersek smooth-loop <video>\n' >&2
+        return 1
+    }
+
+    command -v ffmpeg >/dev/null 2>&1 || {
+        printf 'Dependencia nao encontrada: ffmpeg\n' >&2
+        return 1
+    }
+
+    ensure_dirs
+    source="$(resolve_video "$1")"
+    is_video "${source}" || {
+        printf 'Formato de video nao aceito: %s\n' "${source}" >&2
+        return 1
+    }
+
+    base="$(basename "${source}")"
+    name="${base%.*}"
+    target="${VIDEO_DIR}/${name}-loop-suave.mp4"
+
+    ffmpeg -y -i "${source}" \
+        -an \
+        -filter_complex "[0:v]fps=30,scale='min(1920,iw)':-2,split[forward][copy];[copy]reverse[backward];[forward][backward]concat=n=2:v=1:a=0[v]" \
+        -map "[v]" \
+        -c:v libx264 \
+        -preset medium \
+        -crf 24 \
+        -pix_fmt yuv420p \
+        -movflags +faststart \
+        "${target}"
+
+    printf 'Loop suave criado: %s\n' "${target}"
+    printf 'Use com: Wallpappersek change "%s"\n' "$(basename "${target}")"
+}
+
+command_stop() {
+    local pid
+
+    if pid="$(running_pid)"; then
+        kill "${pid}"
+        rm -f "${PID_FILE}"
+        printf 'Wallpaper animado parado.\n'
+        return 0
+    fi
+
+    rm -f "${PID_FILE}"
+    printf 'Nenhum wallpaper animado do Wallpappersek estava ativo.\n'
+}
+
+command_play() {
+    local video
+    local pid
+
+    [[ "$#" -eq 1 ]] || {
+        printf 'Uso: wallpappersek play <nome|caminho>\n' >&2
+        printf 'Ou:  Wallpappersek change <nome|caminho>\n' >&2
+        return 1
+    }
+
+    ensure_dirs
+    require_backend
+    video="$(resolve_video "$1")"
+
+    is_video "${video}" || {
+        printf 'Formato de video nao aceito: %s\n' "${video}" >&2
+        return 1
+    }
+
+    if pid="$(running_pid)"; then
+        kill "${pid}" >/dev/null 2>&1 || true
+        rm -f "${PID_FILE}"
+    fi
+
+    nohup mpvpaper \
+        --auto-pause \
+        --mpv-options "no-audio loop-file=inf hwdec=auto-safe profile=fast video-sync=display-resample interpolation=no scale=bilinear cscale=bilinear dscale=bilinear correct-downscaling=no sigmoid-upscaling=no" \
+        "${OUTPUT}" \
+        "${video}" \
+        >"${LOG_FILE}" 2>&1 &
+
+    printf '%s\n' "$!" >"${PID_FILE}"
+    printf 'Wallpaper animado iniciado: %s\n' "${video}"
+    printf 'Log: %s\n' "${LOG_FILE}"
+}
+
+command_status() {
+    local pid
+
+    if pid="$(running_pid)"; then
+        printf 'Rodando com PID %s\n' "${pid}"
+        return 0
+    fi
+
+    printf 'Parado.\n'
+}
+
+command_autostart() {
+    local video
+    local quoted_script
+    local quoted_video
+
+    [[ "$#" -eq 1 ]] || {
+        printf 'Uso: wallpappersek autostart <video>\n' >&2
+        return 1
+    }
+
+    ensure_dirs
+    video="$(resolve_video "$1")"
+
+    is_video "${video}" || {
+        printf 'Formato de video nao aceito: %s\n' "${video}" >&2
+        return 1
+    }
+
+    mkdir -p "${AUTOSTART_DIR}"
+    quoted_script="$(desktop_quote "${SCRIPT_PATH}")"
+    quoted_video="$(desktop_quote "${video}")"
+
+    cat >"${AUTOSTART_FILE}" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Wallpappersek
+Comment=Inicia wallpaper animado no COSMIC
+Exec=${quoted_script} play ${quoted_video}
+Terminal=false
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+EOF
+
+    printf 'Inicializacao automatica configurada para: %s\n' "${video}"
+    printf 'Arquivo criado: %s\n' "${AUTOSTART_FILE}"
+}
+
+command_autostart_disable() {
+    if [[ -f "${AUTOSTART_FILE}" ]]; then
+        rm -f "${AUTOSTART_FILE}"
+        printf 'Inicializacao automatica removida.\n'
+        return 0
+    fi
+
+    printf 'Nenhuma inicializacao automatica do Wallpappersek encontrada.\n'
+}
+
+command_deps() {
+    cat <<'EOF'
+Dependencias recomendadas:
+  yay -S --needed mpv mpvpaper
+
+Videos recomendados para baixo consumo:
+  - MP4 H.264
+  - 1080p ou menor
+  - 24 ou 30 FPS
+  - sem audio
+  - loop curto e bem comprimido
+EOF
+}
+
+main() {
+    local command="${1:-help}"
+    shift || true
+
+    case "${command}" in
+        import) command_import "$@" ;;
+        optimize) command_optimize "$@" ;;
+        smooth-loop) command_smooth_loop "$@" ;;
+        list) command_list ;;
+        play|change) command_play "$@" ;;
+        stop) command_stop ;;
+        status) command_status ;;
+        autostart) command_autostart "$@" ;;
+        autostart-disable) command_autostart_disable ;;
+        deps) command_deps ;;
+        help|-h|--help) usage ;;
+        *)
+            printf 'Comando desconhecido: %s\n\n' "${command}" >&2
+            usage >&2
+            return 1
+            ;;
+    esac
+}
+
+main "$@"
