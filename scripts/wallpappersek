@@ -24,6 +24,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/wallpappersek"
 CONFIG_FILE="${CONFIG_DIR}/video-dir"
+LAST_VIDEO_FILE="${CONFIG_DIR}/last-video"
 DEFAULT_VIDEO_DIR="$(detect_default_video_dir)"
 if [[ -n "${WALLPAPPERSEK_VIDEO_DIR:-}" ]]; then
     VIDEO_DIR="${WALLPAPPERSEK_VIDEO_DIR}"
@@ -34,11 +35,20 @@ else
     VIDEO_DIR="${DEFAULT_VIDEO_DIR}"
 fi
 OUTPUT="${WALLPAPPERSEK_OUTPUT:-*}"
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+USER_RUNTIME_DIR="/run/user/$(id -u)"
+if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    RUNTIME_DIR="${XDG_RUNTIME_DIR}"
+elif [[ -d "${USER_RUNTIME_DIR}" ]]; then
+    RUNTIME_DIR="${USER_RUNTIME_DIR}"
+else
+    RUNTIME_DIR="/tmp"
+fi
 PID_FILE="${RUNTIME_DIR}/wallpappersek.pid"
 LOG_FILE="${RUNTIME_DIR}/wallpappersek.log"
 AUTOSTART_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/autostart"
 AUTOSTART_FILE="${AUTOSTART_DIR}/wallpappersek.desktop"
+SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
+SYSTEMD_SERVICE_FILE="${SYSTEMD_USER_DIR}/wallpappersek.service"
 
 usage() {
     cat <<'EOF'
@@ -54,7 +64,7 @@ Uso:
   wallpappersek change <nome|caminho>  Alias de play
   wallpappersek stop                   Para o wallpaper animado
   wallpappersek status                 Mostra se esta rodando
-  wallpappersek autostart <video>      Inicia este video ao entrar no COSMIC
+  wallpappersek autostart [video]      Inicia o ultimo wallpaper ao entrar no login
   wallpappersek autostart-disable      Remove a inicializacao automatica
   wallpappersek deps                   Mostra dependencias recomendadas
   wallpappersek doctor                 Verifica compatibilidade do sistema
@@ -66,6 +76,7 @@ Variaveis:
 
 Pasta padrao inicial: pasta de videos do sistema
 Configuracao persistente: ~/.config/wallpappersek/video-dir
+Ultimo wallpaper salvo: ~/.config/wallpappersek/last-video
 
 Formatos aceitos: mp4, webm, mkv, mov
 EOF
@@ -120,6 +131,35 @@ desktop_quote() {
     printf '"%s"\n' "${value}"
 }
 
+systemd_quote() {
+    local value="$1"
+
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"\n' "${value}"
+}
+
+infer_wayland_env() {
+    local candidate
+
+    if [[ -z "${XDG_RUNTIME_DIR:-}" && "${RUNTIME_DIR}" != "/tmp" ]]; then
+        export XDG_RUNTIME_DIR="${RUNTIME_DIR}"
+    fi
+
+    if [[ -z "${WAYLAND_DISPLAY:-}" && -d "${RUNTIME_DIR}" ]]; then
+        for candidate in "${RUNTIME_DIR}"/wayland-[0-9]*; do
+            [[ -S "${candidate}" ]] || continue
+            [[ "${candidate}" == *-renderD* ]] && continue
+            export WAYLAND_DISPLAY="$(basename "${candidate}")"
+            break
+        done
+    fi
+
+    if [[ -n "${WAYLAND_DISPLAY:-}" && -z "${XDG_SESSION_TYPE:-}" ]]; then
+        export XDG_SESSION_TYPE="wayland"
+    fi
+}
+
 resolve_video() {
     local input="$1"
     local candidate
@@ -139,7 +179,34 @@ resolve_video() {
     return 1
 }
 
+save_last_video() {
+    local video="$1"
+
+    mkdir -p "${CONFIG_DIR}"
+    printf '%s\n' "${video}" >"${LAST_VIDEO_FILE}"
+}
+
+resolve_last_video() {
+    local video
+
+    if [[ ! -r "${LAST_VIDEO_FILE}" ]]; then
+        printf 'Nenhum wallpaper salvo para iniciar automaticamente.\n' >&2
+        printf 'Use primeiro: wallpappersek change <video>\n' >&2
+        return 1
+    fi
+
+    IFS= read -r video <"${LAST_VIDEO_FILE}" || video=""
+    if [[ -z "${video}" ]]; then
+        printf 'Arquivo de ultimo wallpaper vazio: %s\n' "${LAST_VIDEO_FILE}" >&2
+        return 1
+    fi
+
+    resolve_video "${video}"
+}
+
 require_backend() {
+    infer_wayland_env
+
     if [[ "${XDG_SESSION_TYPE:-}" != "wayland" && -z "${WAYLAND_DISPLAY:-}" ]]; then
         printf 'Sessao Wayland nao detectada.\n' >&2
         printf 'O mpvpaper precisa de um desktop Wayland; X11 puro nao e suportado por este backend.\n' >&2
@@ -317,6 +384,7 @@ command_stop() {
 command_play() {
     local video
     local pid
+    local mpv_options
 
     [[ "$#" -eq 1 ]] || {
         printf 'Uso: wallpappersek play <nome|caminho>\n' >&2
@@ -333,14 +401,37 @@ command_play() {
         return 1
     }
 
+    save_last_video "${video}"
+
+    if [[ "${WALLPAPPERSEK_FOREGROUND:-0}" != "1" ]] &&
+        command -v systemctl >/dev/null 2>&1 &&
+        systemctl --user is-active --quiet wallpappersek.service >/dev/null 2>&1; then
+        systemctl --user restart wallpappersek.service
+        printf 'Wallpaper animado trocado: %s\n' "${video}"
+        printf 'Configuracao salva em: %s\n' "${LAST_VIDEO_FILE}"
+        return 0
+    fi
+
     if pid="$(running_pid)"; then
         kill "${pid}" >/dev/null 2>&1 || true
         rm -f "${PID_FILE}"
     fi
 
+    mpv_options="no-audio loop-file=inf hwdec=auto-safe profile=fast video-sync=display-resample interpolation=no scale=bilinear cscale=bilinear dscale=bilinear correct-downscaling=no sigmoid-upscaling=no"
+
+    if [[ "${WALLPAPPERSEK_FOREGROUND:-0}" = "1" ]]; then
+        printf '%s\n' "$$" >"${PID_FILE}"
+        printf 'Wallpaper animado iniciado: %s\n' "${video}"
+        exec mpvpaper \
+            --auto-pause \
+            --mpv-options "${mpv_options}" \
+            "${OUTPUT}" \
+            "${video}"
+    fi
+
     nohup mpvpaper \
         --auto-pause \
-        --mpv-options "no-audio loop-file=inf hwdec=auto-safe profile=fast video-sync=display-resample interpolation=no scale=bilinear cscale=bilinear dscale=bilinear correct-downscaling=no sigmoid-upscaling=no" \
+        --mpv-options "${mpv_options}" \
         "${OUTPUT}" \
         "${video}" \
         >"${LOG_FILE}" 2>&1 &
@@ -348,6 +439,18 @@ command_play() {
     printf '%s\n' "$!" >"${PID_FILE}"
     printf 'Wallpaper animado iniciado: %s\n' "${video}"
     printf 'Log: %s\n' "${LOG_FILE}"
+}
+
+command_play_last() {
+    local video
+
+    [[ "$#" -eq 0 ]] || {
+        printf 'Uso: wallpappersek play-last\n' >&2
+        return 1
+    }
+
+    video="$(resolve_last_video)"
+    command_play "${video}"
 }
 
 command_status() {
@@ -364,43 +467,101 @@ command_status() {
 command_autostart() {
     local video
     local quoted_script
-    local quoted_video
+    local quoted_runtime_dir
+    local service_enabled=1
 
-    [[ "$#" -eq 1 ]] || {
-        printf 'Uso: wallpappersek autostart <video>\n' >&2
+    [[ "$#" -le 1 ]] || {
+        printf 'Uso: wallpappersek autostart [video]\n' >&2
         return 1
     }
 
     ensure_dirs
-    video="$(resolve_video "$1")"
+    if [[ "$#" -eq 1 ]]; then
+        video="$(resolve_video "$1")"
 
-    is_video "${video}" || {
-        printf 'Formato de video nao aceito: %s\n' "${video}" >&2
-        return 1
-    }
+        is_video "${video}" || {
+            printf 'Formato de video nao aceito: %s\n' "${video}" >&2
+            return 1
+        }
 
-    mkdir -p "${AUTOSTART_DIR}"
+        save_last_video "${video}"
+    else
+        video="$(resolve_last_video)"
+    fi
+
+    mkdir -p "${AUTOSTART_DIR}" "${SYSTEMD_USER_DIR}"
     quoted_script="$(desktop_quote "${SCRIPT_PATH}")"
-    quoted_video="$(desktop_quote "${video}")"
+    quoted_runtime_dir="$(systemd_quote "${RUNTIME_DIR}")"
 
     cat >"${AUTOSTART_FILE}" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Wallpappersek
-Comment=Inicia wallpaper animado no COSMIC
-Exec=${quoted_script} play ${quoted_video}
+Comment=Inicia wallpaper animado no login
+Exec=${quoted_script} play-last
 Terminal=false
 StartupNotify=false
 X-GNOME-Autostart-enabled=true
 EOF
 
-    printf 'Inicializacao automatica configurada para: %s\n' "${video}"
-    printf 'Arquivo criado: %s\n' "${AUTOSTART_FILE}"
+    cat >"${SYSTEMD_SERVICE_FILE}" <<EOF
+[Unit]
+Description=Wallpappersek animated wallpaper
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+Environment=XDG_RUNTIME_DIR=${quoted_runtime_dir}
+Environment=WALLPAPPERSEK_FOREGROUND=1
+ExecStartPre=/usr/bin/sleep 3
+ExecStart=${quoted_script} play-last
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl --user daemon-reload >/dev/null 2>&1 &&
+            systemctl --user enable wallpappersek.service >/dev/null 2>&1; then
+            service_enabled=0
+        fi
+    fi
+
+    printf 'Inicializacao automatica configurada para usar o ultimo wallpaper.\n'
+    printf 'Wallpaper atual salvo: %s\n' "${video}"
+    printf 'Configuracao salva em: %s\n' "${LAST_VIDEO_FILE}"
+    printf 'Arquivo desktop criado: %s\n' "${AUTOSTART_FILE}"
+    printf 'Servico systemd criado: %s\n' "${SYSTEMD_SERVICE_FILE}"
+    if [[ "${service_enabled}" -eq 0 ]]; then
+        printf 'Servico systemd de usuario habilitado.\n'
+    else
+        printf 'Aviso: nao foi possivel habilitar o servico systemd automaticamente.\n' >&2
+        printf 'Rode: systemctl --user enable --now wallpappersek.service\n' >&2
+    fi
 }
 
 command_autostart_disable() {
+    local removed=1
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user disable --now wallpappersek.service >/dev/null 2>&1 || true
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
+
     if [[ -f "${AUTOSTART_FILE}" ]]; then
         rm -f "${AUTOSTART_FILE}"
+        removed=0
+    fi
+
+    if [[ -f "${SYSTEMD_SERVICE_FILE}" ]]; then
+        rm -f "${SYSTEMD_SERVICE_FILE}"
+        removed=0
+    fi
+
+    if [[ "${removed}" -eq 0 ]]; then
         printf 'Inicializacao automatica removida.\n'
         return 0
     fi
@@ -517,6 +678,7 @@ main() {
         smooth-loop) command_smooth_loop "$@" ;;
         list) command_list ;;
         play|change) command_play "$@" ;;
+        play-last) command_play_last "$@" ;;
         stop) command_stop ;;
         status) command_status ;;
         autostart) command_autostart "$@" ;;

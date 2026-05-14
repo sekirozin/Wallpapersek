@@ -122,7 +122,15 @@ Verificar compatibilidade do sistema:
 ./scripts/wallpappersek doctor
 ```
 
-Iniciar automaticamente quando entrar no COSMIC:
+Iniciar automaticamente no login grafico:
+
+```bash
+./scripts/wallpappersek autostart
+```
+
+Esse comando cria uma entrada em `~/.config/autostart` e tambem um servico de usuario em `~/.config/systemd/user/wallpappersek.service`, quando `systemd --user` estiver disponivel. O autostart usa sempre o ultimo wallpaper iniciado com `play` ou `change`.
+
+Tambem da para definir o wallpaper inicial ao configurar o autostart:
 
 ```bash
 ./scripts/wallpappersek autostart "Samurai 4k.webm"
