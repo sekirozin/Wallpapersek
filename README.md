@@ -2,7 +2,7 @@
 
 Wallpaper animado leve para Linux com Wayland.
 
-O projeto usa `~/Downloads/Youtube` como pasta padrao de videos e roda o arquivo escolhido como wallpaper animado via `mpvpaper`. A configuracao do player foi pensada para gastar pouco recurso: sem audio, loop infinito, decodificacao por hardware quando disponivel e filtros de escala leves.
+O projeto usa a pasta de videos do sistema como padrao inicial, por exemplo `~/Vídeos` em sistemas em portugues ou `~/Videos` em sistemas em ingles. O arquivo escolhido roda como wallpaper animado via `mpvpaper`. A configuracao do player foi pensada para gastar pouco recurso: sem audio, loop infinito, decodificacao por hardware quando disponivel e filtros de escala leves.
 
 ## Compatibilidade
 
@@ -62,7 +62,13 @@ Veja as recomendacoes pelo proprio projeto:
 
 ## Uso
 
-Importar um video para a pasta padrao `~/Downloads/Youtube`:
+Definir uma nova pasta padrao de wallpapers:
+
+```bash
+wallpappersek set "$HOME/Vídeos/Wallpapers"
+```
+
+Importar um video para a pasta padrao:
 
 ```bash
 ./scripts/wallpappersek import ~/Videos/wallpaper.mp4
@@ -146,10 +152,24 @@ Wallpappersek change "Gon 4k.webm"
 Por padrao, os videos ficam em:
 
 ```text
-~/Downloads/Youtube
+pasta de videos do sistema
 ```
 
-Voce pode trocar a pasta usando:
+Em sistemas em portugues, normalmente isso sera `~/Vídeos`. Em sistemas em ingles, normalmente sera `~/Videos`.
+
+Voce pode trocar a pasta de forma persistente usando:
+
+```bash
+wallpappersek set "$HOME/Vídeos/Wallpapers"
+```
+
+A configuracao fica salva em:
+
+```text
+~/.config/wallpappersek/video-dir
+```
+
+Tambem da para trocar temporariamente so para um comando usando:
 
 ```bash
 WALLPAPPERSEK_VIDEO_DIR="$HOME/Videos/Wallpapers" wallpappersek list

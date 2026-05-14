@@ -1,9 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+detect_default_video_dir() {
+    local xdg_videos
+
+    if command -v xdg-user-dir >/dev/null 2>&1; then
+        xdg_videos="$(xdg-user-dir VIDEOS 2>/dev/null || true)"
+        if [[ -n "${xdg_videos}" && "${xdg_videos}" != "${HOME}" ]]; then
+            printf '%s\n' "${xdg_videos}"
+            return 0
+        fi
+    fi
+
+    if [[ -d "${HOME}/Vídeos" ]]; then
+        printf '%s\n' "${HOME}/Vídeos"
+        return 0
+    fi
+
+    printf '%s\n' "${HOME}/Videos"
+}
+
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-VIDEO_DIR="${WALLPAPPERSEK_VIDEO_DIR:-${HOME}/Downloads/Youtube}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/wallpappersek"
+CONFIG_FILE="${CONFIG_DIR}/video-dir"
+DEFAULT_VIDEO_DIR="$(detect_default_video_dir)"
+if [[ -n "${WALLPAPPERSEK_VIDEO_DIR:-}" ]]; then
+    VIDEO_DIR="${WALLPAPPERSEK_VIDEO_DIR}"
+elif [[ -r "${CONFIG_FILE}" ]]; then
+    IFS= read -r VIDEO_DIR <"${CONFIG_FILE}" || VIDEO_DIR="${DEFAULT_VIDEO_DIR}"
+    [[ -n "${VIDEO_DIR}" ]] || VIDEO_DIR="${DEFAULT_VIDEO_DIR}"
+else
+    VIDEO_DIR="${DEFAULT_VIDEO_DIR}"
+fi
 OUTPUT="${WALLPAPPERSEK_OUTPUT:-*}"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 PID_FILE="${RUNTIME_DIR}/wallpappersek.pid"
@@ -17,6 +46,7 @@ wallpappersek - wallpaper animado leve para Linux Wayland
 
 Uso:
   wallpappersek import <video...>      Copia videos para a pasta padrao
+  wallpappersek set <pasta>            Define a pasta padrao de wallpapers
   wallpappersek optimize <video>       Cria uma versao leve na pasta padrao
   wallpappersek smooth-loop <video>    Cria uma versao ping-pong para loop suave
   wallpappersek list                   Lista videos salvos
@@ -31,8 +61,11 @@ Uso:
   wallpappersek help                   Mostra esta ajuda
 
 Variaveis:
-  WALLPAPPERSEK_VIDEO_DIR              Pasta de videos, padrao: ~/Downloads/Youtube
+  WALLPAPPERSEK_VIDEO_DIR              Override temporario da pasta de videos
   WALLPAPPERSEK_OUTPUT                 Saida do monitor para mpvpaper, padrao: *
+
+Pasta padrao inicial: pasta de videos do sistema
+Configuracao persistente: ~/.config/wallpappersek/video-dir
 
 Formatos aceitos: mp4, webm, mkv, mov
 EOF
@@ -67,6 +100,16 @@ absolute_path() {
     else
         printf '%s/%s\n' "$(pwd)" "${path}"
     fi
+}
+
+expand_user_path() {
+    local path="$1"
+
+    case "${path}" in
+        "~") printf '%s\n' "${HOME}" ;;
+        "~/"*) printf '%s/%s\n' "${HOME}" "${path#"~/"}" ;;
+        *) printf '%s\n' "${path}" ;;
+    esac
 }
 
 desktop_quote() {
@@ -147,6 +190,24 @@ command_import() {
         cp "${source}" "${target}"
         printf 'Importado: %s\n' "${target}"
     done
+}
+
+command_set() {
+    local target
+
+    [[ "$#" -eq 1 ]] || {
+        printf 'Uso: wallpappersek set <pasta>\n' >&2
+        return 1
+    }
+
+    target="$(expand_user_path "$1")"
+    target="$(absolute_path "${target}")"
+
+    mkdir -p "${target}" "${CONFIG_DIR}"
+    printf '%s\n' "${target}" >"${CONFIG_FILE}"
+
+    printf 'Pasta padrao de wallpapers definida: %s\n' "${target}"
+    printf 'Configuracao salva em: %s\n' "${CONFIG_FILE}"
 }
 
 command_list() {
@@ -424,6 +485,13 @@ command_doctor() {
 
     if find "${VIDEO_DIR}" -maxdepth 0 -type d >/dev/null 2>&1 || mkdir -p "${VIDEO_DIR}" >/dev/null 2>&1; then
         printf '[ok] pasta de videos: %s\n' "${VIDEO_DIR}"
+        if [[ -n "${WALLPAPPERSEK_VIDEO_DIR:-}" ]]; then
+            printf '[info] pasta definida por WALLPAPPERSEK_VIDEO_DIR\n'
+        elif [[ -r "${CONFIG_FILE}" ]]; then
+            printf '[info] pasta definida por %s\n' "${CONFIG_FILE}"
+        else
+            printf '[info] usando pasta padrao inicial\n'
+        fi
     else
         printf '[erro] nao foi possivel acessar/criar a pasta de videos: %s\n' "${VIDEO_DIR}"
         ok=1
@@ -444,6 +512,7 @@ main() {
 
     case "${command}" in
         import) command_import "$@" ;;
+        set) command_set "$@" ;;
         optimize) command_optimize "$@" ;;
         smooth-loop) command_smooth_loop "$@" ;;
         list) command_list ;;
