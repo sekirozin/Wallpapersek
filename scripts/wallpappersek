@@ -13,7 +13,7 @@ AUTOSTART_FILE="${AUTOSTART_DIR}/wallpappersek.desktop"
 
 usage() {
     cat <<'EOF'
-wallpappersek - wallpaper animado leve para CachyOS + COSMIC
+wallpappersek - wallpaper animado leve para Linux Wayland
 
 Uso:
   wallpappersek import <video...>      Copia videos para a pasta padrao
@@ -27,6 +27,7 @@ Uso:
   wallpappersek autostart <video>      Inicia este video ao entrar no COSMIC
   wallpappersek autostart-disable      Remove a inicializacao automatica
   wallpappersek deps                   Mostra dependencias recomendadas
+  wallpappersek doctor                 Verifica compatibilidade do sistema
   wallpappersek help                   Mostra esta ajuda
 
 Variaveis:
@@ -35,6 +36,16 @@ Variaveis:
 
 Formatos aceitos: mp4, webm, mkv, mov
 EOF
+}
+
+detect_distro() {
+    if [[ -r /etc/os-release ]]; then
+        . /etc/os-release
+        printf '%s\n' "${ID:-linux}"
+        return 0
+    fi
+
+    printf 'linux\n'
 }
 
 is_video() {
@@ -86,9 +97,15 @@ resolve_video() {
 }
 
 require_backend() {
+    if [[ "${XDG_SESSION_TYPE:-}" != "wayland" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+        printf 'Sessao Wayland nao detectada.\n' >&2
+        printf 'O mpvpaper precisa de um desktop Wayland; X11 puro nao e suportado por este backend.\n' >&2
+        return 1
+    fi
+
     if ! command -v mpvpaper >/dev/null 2>&1; then
         printf 'Backend nao encontrado: mpvpaper\n' >&2
-        printf 'No CachyOS/Arch, instale com: yay -S --needed mpv mpvpaper\n' >&2
+        printf 'Veja opcoes de instalacao com: wallpappersek deps\n' >&2
         printf 'Depois rode novamente: wallpappersek play <video>\n' >&2
         return 1
     fi
@@ -137,7 +154,7 @@ command_list() {
 
     find "${VIDEO_DIR}" -maxdepth 1 -type f \
         \( -iname '*.mp4' -o -iname '*.webm' -o -iname '*.mkv' -o -iname '*.mov' \) \
-        -printf '%f\n' | sort
+        -exec basename {} \; | sort
 }
 
 command_optimize() {
@@ -331,17 +348,94 @@ command_autostart_disable() {
 }
 
 command_deps() {
+    local distro
+
+    distro="$(detect_distro)"
+
     cat <<'EOF'
 Dependencias recomendadas:
-  yay -S --needed mpv mpvpaper
+  - bash
+  - mpv
+  - mpvpaper
+  - ffmpeg (somente para optimize e smooth-loop)
+  - sessao Wayland
 
-Videos recomendados para baixo consumo:
-  - MP4 H.264
-  - 1080p ou menor
-  - 24 ou 30 FPS
-  - sem audio
-  - loop curto e bem comprimido
+Instalacao por distro:
+  CachyOS/Arch:
+    yay -S --needed mpv mpvpaper ffmpeg
+
+  Fedora:
+    sudo dnf install mpv ffmpeg
+    mpvpaper normalmente precisa ser instalado via COPR, pacote de terceiros ou build manual.
+
+  Debian/Ubuntu:
+    sudo apt install mpv ffmpeg
+    mpvpaper normalmente precisa ser instalado via pacote de terceiros ou build manual.
+
+Observacao:
+  O recurso de wallpaper animado depende do mpvpaper. Sem ele, comandos como import,
+  list, optimize e smooth-loop ainda podem funcionar, mas play/change nao.
 EOF
+
+    printf '\nSistema detectado: %s\n' "${distro}"
+}
+
+command_doctor() {
+    local ok=0
+
+    printf 'Verificando compatibilidade do Wallpappersek...\n\n'
+
+    if [[ -n "${BASH_VERSION:-}" ]]; then
+        printf '[ok] bash: %s\n' "${BASH_VERSION%%(*}"
+    else
+        printf '[erro] bash nao detectado\n'
+        ok=1
+    fi
+
+    if [[ "${XDG_SESSION_TYPE:-}" = "wayland" || -n "${WAYLAND_DISPLAY:-}" ]]; then
+        printf '[ok] Wayland detectado'
+        [[ -n "${XDG_SESSION_TYPE:-}" ]] && printf ' via XDG_SESSION_TYPE=%s' "${XDG_SESSION_TYPE}"
+        [[ -n "${WAYLAND_DISPLAY:-}" ]] && printf ' (%s)' "${WAYLAND_DISPLAY}"
+        printf '\n'
+    else
+        printf '[erro] Wayland nao detectado; X11 puro nao e suportado pelo mpvpaper\n'
+        ok=1
+    fi
+
+    if command -v mpv >/dev/null 2>&1; then
+        printf '[ok] mpv: %s\n' "$(command -v mpv)"
+    else
+        printf '[erro] mpv nao encontrado\n'
+        ok=1
+    fi
+
+    if command -v mpvpaper >/dev/null 2>&1; then
+        printf '[ok] mpvpaper: %s\n' "$(command -v mpvpaper)"
+    else
+        printf '[erro] mpvpaper nao encontrado\n'
+        ok=1
+    fi
+
+    if command -v ffmpeg >/dev/null 2>&1; then
+        printf '[ok] ffmpeg: %s\n' "$(command -v ffmpeg)"
+    else
+        printf '[aviso] ffmpeg nao encontrado; optimize e smooth-loop nao vao funcionar\n'
+    fi
+
+    if find "${VIDEO_DIR}" -maxdepth 0 -type d >/dev/null 2>&1 || mkdir -p "${VIDEO_DIR}" >/dev/null 2>&1; then
+        printf '[ok] pasta de videos: %s\n' "${VIDEO_DIR}"
+    else
+        printf '[erro] nao foi possivel acessar/criar a pasta de videos: %s\n' "${VIDEO_DIR}"
+        ok=1
+    fi
+
+    if [[ "${ok}" -eq 0 ]]; then
+        printf '\nSistema pronto para usar wallpaper animado.\n'
+    else
+        printf '\nSistema ainda nao esta pronto. Veja instalacao com: wallpappersek deps\n'
+    fi
+
+    return "${ok}"
 }
 
 main() {
@@ -359,6 +453,7 @@ main() {
         autostart) command_autostart "$@" ;;
         autostart-disable) command_autostart_disable ;;
         deps) command_deps ;;
+        doctor) command_doctor ;;
         help|-h|--help) usage ;;
         *)
             printf 'Comando desconhecido: %s\n\n' "${command}" >&2

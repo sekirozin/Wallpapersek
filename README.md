@@ -1,18 +1,50 @@
 # Wallpappersek
 
-Wallpaper animado leve para CachyOS com COSMIC.
+Wallpaper animado leve para Linux com Wayland.
 
-O projeto usa `~/Downloads/Youtube` como pasta padrao de videos e roda o arquivo escolhido como wallpaper animado via `mpvpaper`, que e uma solucao simples para desktops Wayland. A configuracao do player foi pensada para gastar pouco recurso: sem audio, loop infinito, decodificacao por hardware quando disponivel e filtros de escala leves.
+O projeto usa `~/Downloads/Youtube` como pasta padrao de videos e roda o arquivo escolhido como wallpaper animado via `mpvpaper`. A configuracao do player foi pensada para gastar pouco recurso: sem audio, loop infinito, decodificacao por hardware quando disponivel e filtros de escala leves.
+
+## Compatibilidade
+
+O Wallpappersek nao funciona em qualquer Linux no sentido amplo. Ele precisa de:
+
+- Linux com Bash
+- sessao Wayland
+- `mpvpaper` para usar `play`/`change`
+- `mpv`
+- `ffmpeg` para `optimize` e `smooth-loop`
+
+Ambientes X11 puros nao sao suportados pelo backend atual. Em desktops Wayland como COSMIC, Hyprland, Sway e outros compositors compativeis com `mpvpaper`, a chance de funcionar e boa desde que as dependencias estejam instaladas.
+
+Verifique o sistema atual:
+
+```bash
+./scripts/wallpappersek doctor
+```
 
 ## Dependencias
 
 No CachyOS/Arch:
 
 ```bash
-yay -S --needed mpv mpvpaper
+yay -S --needed mpv mpvpaper ffmpeg
 ```
 
-Verifique pelo proprio projeto:
+No Fedora:
+
+```bash
+sudo dnf install mpv ffmpeg
+```
+
+No Debian/Ubuntu:
+
+```bash
+sudo apt install mpv ffmpeg
+```
+
+No Fedora, Debian e Ubuntu, o `mpvpaper` pode exigir COPR, pacote de terceiros ou build manual, dependendo da distro e versao.
+
+Veja as recomendacoes pelo proprio projeto:
 
 ```bash
 ./scripts/wallpappersek deps
@@ -76,6 +108,12 @@ Ver status:
 
 ```bash
 ./scripts/wallpappersek status
+```
+
+Verificar compatibilidade do sistema:
+
+```bash
+./scripts/wallpappersek doctor
 ```
 
 Iniciar automaticamente quando entrar no COSMIC:
